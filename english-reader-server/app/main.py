@@ -119,10 +119,11 @@ def build_prompt(word: str, sentence: str) -> str:
 "{sentence}"
 
 要求：
-1. 给出准确的中文释义（不超过15个字）
-2. 用一句话解释该词在此处的语义功能
+1. 第一行：仅输出中文含义（如：可持续的），不要包含“中文释义”等前缀。
+2. 第二行：仅输出一句话的语境解释（如：描述的是发展和环境保护能够长期维持的状态。），不要包含“语义功能”等前缀。
 3. 不要列出其他词义
 4. 不要翻译整个句子
+5. 严格只输出这两行内容
 """
 
 # =========================
@@ -211,8 +212,8 @@ def extract_words_with_coords(pdf_file):
         words = page.extract_words(
             x_tolerance=1, 
             y_tolerance=1, 
-            keep_blank_chars=False,
-            use_text_flow=True
+            keep_blank_chars=False
+            # use_text_flow=True # 禁用，因为它有时会导致跨空格合并单词
         )
         
         if not words: continue
@@ -228,8 +229,17 @@ def extract_words_with_coords(pdf_file):
                 current_char_idx += 1
                 last_x1 = 0
             
-            # 判断是否需要空格 (x0 与上一个 x1 的距离)
-            if last_x1 > 0 and (w['x0'] - last_x1) > 2: 
+            # 判断是否需要空格
+            # 默认加空格，除非前一个词是连字符结尾，或者当前词是连字符开头
+            need_space = True
+            if last_x1 == 0: # 行首
+                need_space = False
+            elif text.startswith('-') or (full_text and full_text[-1] == '-'):
+                 need_space = False
+            # 如果实际上距离非常近 (e.g. kerning), pdfplumber 可能会分开但视觉上是一体的
+            # 但 pdfplumber extract_words 默认就是按空格分的，所以通常还是需要空格
+            
+            if need_space: 
                 full_text += " "
                 current_char_idx += 1
             

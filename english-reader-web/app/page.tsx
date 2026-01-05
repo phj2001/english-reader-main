@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import dynamic from 'next/dynamic';
 
 const PDFViewer = dynamic(() => import('../components/PDFViewer'), {
@@ -133,21 +133,15 @@ export default function HomePage() {
    * 功能：点击页面任意位置（包括点击卡片本身），关闭所有弹窗
    * ======================= */
   useEffect(() => {
-    const closeAll = () => {
+    // 需求：双击关闭弹窗，而不是单击
+    const handleGlobalDoubleClick = () => {
       // 1. 关闭所有 UI 状态
       setWordPopup(null);
       setSelectionPopup(null);
-      
-      // ⭐ 核心修复：强制清除浏览器选区
-      // 解决“点击翻译卡片后，卡片消失又立刻再次弹出”的 Bug。
-      // 因为点击卡片会触发 mousedown，这里先清空选区；
-      // 随后的 mouseup 触发 handleMouseUp 时，发现选区为空，就不会再弹窗了。
-      window.getSelection()?.removeAllRanges();
     };
 
-    // 使用 mousedown 确保在鼠标按下的瞬间就响应
-    document.addEventListener('mousedown', closeAll);
-    return () => document.removeEventListener('mousedown', closeAll);
+    document.addEventListener('dblclick', handleGlobalDoubleClick);
+    return () => document.removeEventListener('dblclick', handleGlobalDoubleClick);
   }, []);
 
   /** =======================
@@ -224,6 +218,96 @@ export default function HomePage() {
         translation: `翻译失败: ${err.message || '未知错误'}` 
       } : null);
     }
+  };
+
+  /* =======================
+   * 5. 拖拽与缩放逻辑 (User Custom Layout)
+   * ======================= */
+  const [customLayout, setCustomLayout] = useState<{x: number, y: number, width: number, height: number} | null>(null);
+  const dragRef = useRef<{startX: number, startY: number, initialLayout: any} | null>(null);
+
+  const handleDragStart = (e: React.MouseEvent) => {
+    // 仅允许左键拖拽
+    if (e.button !== 0) return;
+    e.preventDefault(); // 防止选中文本
+    
+    // 初始状态计算
+    // 如果没有 customLayout，则使用当前的默认计算位置 (注意：这里需要与 Render 中的默认逻辑一致)
+    const initialX = customLayout ? customLayout.x : Math.min((selectionPopup?.x || 0) - 192, window.innerWidth - 400);
+    const initialY = customLayout ? customLayout.y : (selectionPopup?.y || 0) + 10;
+    const initialW = customLayout ? customLayout.width : 384; // w-96 = 24rem = 384px
+    const initialH = customLayout ? customLayout.height : 300; // 默认高度
+
+    dragRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        initialLayout: { x: initialX, y: initialY, width: initialW, height: initialH }
+    };
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+        if (!dragRef.current) return;
+        const deltaX = moveEvent.clientX - dragRef.current.startX;
+        const deltaY = moveEvent.clientY - dragRef.current.startY;
+        
+        setCustomLayout({
+            x: dragRef.current.initialLayout.x + deltaX,
+            y: dragRef.current.initialLayout.y + deltaY,
+            width: dragRef.current.initialLayout.width,
+            height: dragRef.current.initialLayout.height
+        });
+    };
+
+    const handleMouseUp = () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+        dragRef.current = null;
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const handleResizeStart = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const initialX = customLayout ? customLayout.x : Math.min((selectionPopup?.x || 0) - 192, window.innerWidth - 400);
+    const initialY = customLayout ? customLayout.y : (selectionPopup?.y || 0) + 10;
+    const initialW = customLayout ? customLayout.width : 384; 
+    const initialH = customLayout ? customLayout.height : 300; // 初始预估高度，可能不准，但resize会修正它
+
+    dragRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        initialLayout: { x: initialX, y: initialY, width: initialW, height: initialH }
+    };
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+        if (!dragRef.current) return;
+        const deltaX = moveEvent.clientX - dragRef.current.startX;
+        const deltaY = moveEvent.clientY - dragRef.current.startY;
+        
+        // 限制最小尺寸
+        const newWidth = Math.max(200, dragRef.current.initialLayout.width + deltaX);
+        const newHeight = Math.max(150, dragRef.current.initialLayout.height + deltaY);
+
+        setCustomLayout({
+            x: dragRef.current.initialLayout.x,
+            y: dragRef.current.initialLayout.y,
+            width: newWidth,
+            height: newHeight
+        });
+    };
+
+    const handleMouseUp = () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+        dragRef.current = null;
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
   };
 
   /* =======================
@@ -424,14 +508,14 @@ export default function HomePage() {
       {/* --- 单词解释 Popup --- */}
       {wordPopup && (
         <div 
-          className="fixed z-50 bg-white/95 backdrop-blur-xl shadow-2xl rounded-xl border border-gray-200/50 p-5 w-80 animate-in fade-in zoom-in-95 duration-200"
+          className="fixed z-50 bg-white/95 backdrop-blur-xl shadow-2xl rounded-xl border border-gray-200/50 p-5 w-80 animate-in fade-in zoom-in-95 duration-200 max-h-[60vh] overflow-y-auto"
           style={{ 
-            left: wordPopup.x, 
-            top: wordPopup.y + 20,
-            fontFamily: 'system-ui, -apple-system, sans-serif' // 翻译卡片用无衬线体更易读
+            left: Math.min(wordPopup.x, window.innerWidth - 340), // 防止右侧溢出
+            top: Math.min(wordPopup.y + 20, window.innerHeight - 300), // 防止底部溢出
+            fontFamily: 'system-ui, -apple-system, sans-serif'
           }}
-          // 阻止冒泡，防止点击卡片内部触发全局 closeAll
-          onMouseDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()} 
+          onDoubleClick={(e) => e.stopPropagation()} // 防止双击卡片关闭自己
         >
           {!wordPopup.data ? (
              <div className="flex items-center gap-3 text-gray-400">
@@ -439,7 +523,7 @@ export default function HomePage() {
                <span className="text-sm">Thinking...</span>
              </div>
           ) : (
-            <div>
+            <div className="select-text"> {/* 允许复制 */}
               <div className="flex items-baseline justify-between mb-3 border-b border-gray-100 pb-2">
                 <h3 className="text-xl font-bold text-gray-900">{wordPopup.data.word}</h3>
                 <span className="text-xs font-mono text-green-600 bg-green-50 px-2 py-0.5 rounded-full">
@@ -447,29 +531,75 @@ export default function HomePage() {
                 </span>
               </div>
               <p className="text-sm font-semibold text-gray-700 mb-2">{wordPopup.data.meaning_zh}</p>
-              <p className="text-xs text-gray-500 leading-relaxed bg-gray-50 p-3 rounded-lg">
-                {wordPopup.data.explanation_zh}
+              <p className="text-xs text-gray-500 leading-relaxed bg-gray-50 p-3 rounded-lg select-text">
+                 {wordPopup.data.explanation_zh}
               </p>
             </div>
           )}
         </div>
       )}
 
-      {/* --- 句子翻译 Popup --- */}
+      {/* --- 句子翻译 Popup (Draggable & Resizable) --- */}
       {selectionPopup && (
-        <div 
-          className="fixed z-50 bg-gray-900/90 backdrop-blur-md text-white shadow-2xl rounded-xl p-4 max-w-sm animate-in slide-in-from-bottom-2 duration-300"
-          style={{ 
-            left: Math.min(selectionPopup.x, window.innerWidth - 320), 
-            top: selectionPopup.y + 20,
-            fontFamily: 'system-ui, -apple-system, sans-serif'
-          }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <p className="text-sm leading-relaxed text-gray-100 font-medium">
-            {selectionPopup.translation}
-          </p>
-        </div>
+         <div 
+            className="fixed z-50 bg-gray-900/95 backdrop-blur-md text-white shadow-2xl rounded-xl flex flex-col animate-in fade-in zoom-in-95 duration-200"
+            style={{ 
+              // 使用 Custom Layout 或 默认 Layout
+              left: customLayout ? customLayout.x : Math.min(selectionPopup.x - 192, window.innerWidth - 400),
+              top: customLayout ? customLayout.y : selectionPopup.y + 10,
+              width: customLayout ? customLayout.width : 384, // w-96
+              height: customLayout ? customLayout.height : 'auto',
+              maxHeight: customLayout ? 'none' : '60vh', // 默认模式下限制高度，自定义模式下由 height 控制
+              fontFamily: 'system-ui, -apple-system, sans-serif'
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()} 
+         >
+            {/* Draggable Header */}
+            <div 
+                className="flex items-center justify-between px-5 py-3 border-b border-gray-700 cursor-move select-none"
+                onMouseDown={handleDragStart}
+            >
+               <div className="flex items-center gap-2">
+                  <span className="text-lg">✨</span>
+                  <span className="text-sm font-medium text-gray-300">AI 翻译</span>
+               </div>
+               
+               <button 
+                 onClick={() => setSelectionPopup(null)}
+                 className="text-gray-400 hover:text-white transition-colors"
+                 onMouseDown={(e) => e.stopPropagation()} // 防止触发拖拽
+               >
+                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+               </button>
+            </div>
+            
+            {/* Scrollable Content */}
+            <div className="flex-1 overflow-y-auto p-5">
+                <p className="text-gray-300 text-sm italic mb-4 border-l-2 border-blue-500 pl-3 leading-relaxed opacity-80 select-text">
+                "{selectionPopup.text}"
+                </p>
+
+                <div className="text-base leading-relaxed font-light select-text">
+                {selectionPopup.translation === "翻译中..." ? (
+                    <span className="animate-pulse flex items-center gap-2">
+                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></span>
+                        翻译中...
+                    </span>
+                ) : (
+                    selectionPopup.translation
+                )}
+                </div>
+            </div>
+
+            {/* Resize Handle (Bottom Right) */}
+            <div 
+                className="absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize flex items-end justify-end p-1"
+                onMouseDown={handleResizeStart}
+            >
+                <div className="w-2 h-2 bg-gray-500 rounded-full opacity-50"></div>
+            </div>
+         </div>
       )}
     </div>
   );
