@@ -180,117 +180,112 @@ def parse_docx(file_bytes: bytes) -> str:
 def process_text(raw_text: str, word_map=None):
     """
     文本结构化核心逻辑
-    Enhanced to detect <<<PARAGRAPH_BREAK>>> markers from OCR for accurate layout preservation.
+    关键点：**段落优先**——先按原始文本里的自然段(\n\n)切分，再对每个段落单独做句子与分词。
+    这样可以完全尊重 OCR / 原文中的段落排版，而不会因为 spaCy 的句子切分而丢失段落信息。
     """
-    doc = nlp(raw_text)
     sentences = []
-    
-    all_sentences = list(doc.sents)
-    
-    # DEBUG: Print sentence count and first few sentence starts
-    print(f"DEBUG: spaCy detected {len(all_sentences)} sentences")
-    paragraph_markers_in_text = raw_text.count('<<<PARAGRAPH_BREAK>>>')
-    print(f"DEBUG: Paragraph markers in text: {paragraph_markers_in_text}")
-    for i, s in enumerate(all_sentences[:6]):
-        print(f"DEBUG: Sentence {i}: start={s.start_char}, text='{s.text[:60]}...'")
-    
-    for sent_idx, sent in enumerate(all_sentences):
-        layout_info = {
-            "is_new_paragraph": False,
-            "indent_level": 0
-        }
-        
-        # First sentence is always a new paragraph
-        if sent_idx == 0:
-            layout_info["is_new_paragraph"] = True
-        else:
-            prev_sent_end = all_sentences[sent_idx-1].end_char if sent_idx > 0 else 0
-            gap_text = raw_text[prev_sent_end : sent.start_char]
-            
-            # Check for unique paragraph marker (most reliable)
-            if '<<<PARAGRAPH_BREAK>>>' in gap_text:
-                layout_info["is_new_paragraph"] = True
-                print(f"DEBUG: PARAGRAPH MARKER detected before sentence {sent_idx}: '{sent.text[:50]}...'")
-            # Also check if the sentence itself starts with the marker (in case spaCy merged it)
-            elif sent.text.strip().startswith('<<<PARAGRAPH_BREAK>>>'):
-                layout_info["is_new_paragraph"] = True
-                print(f"DEBUG: PARAGRAPH MARKER at sentence start {sent_idx}: '{sent.text[:50]}...'")
-            # Fallback: traditional newline detection
-            elif '\n\n' in gap_text or gap_text.count('\n') >= 2:
-                layout_info["is_new_paragraph"] = True
-                print(f"DEBUG: Paragraph break (fallback) detected before sentence {sent_idx}: '{sent.text[:50]}...'")
-            
-        spacy_tokens = list(sent)
-        merged_tokens = []
-        
-        suffixes = ["n't", "'s", "'ll", "'re", "'ve", "'m", "'d"]
 
-        for token in spacy_tokens:
-            if token.is_space: continue
-            
-            # Skip paragraph break markers - they're only for layout detection
-            if '<<<PARAGRAPH_BREAK>>>' in token.text:
-                continue
-            
-            should_merge = False
+    # 先按 \n\n（允许中间有空白）切成自然段，确保段落信息来自原文而不是 spaCy 的句子分割
+    paragraph_splits = re.split(r"\n\s*\n+", raw_text)
+    offset = 0  # 用来把段落内的相对下标，映射回整篇文章中的绝对下标
+
+    print(f"DEBUG: Detected {len(paragraph_splits)} paragraphs from raw_text")
+
+    suffixes = ["n't", "'s", "'ll", "'re", "'ve", "'m", "'d"]
+
+    for para_idx, para_text in enumerate(paragraph_splits):
+        if not para_text.strip():
+            # 空段落：直接把 offset 推进（+2 模拟之前的 \n\n）
+            offset += len(para_text) + 2
+            continue
+
+        # 对当前段落单独做 NLP 句子分割
+        doc = nlp(para_text)
+        para_sentences = list(doc.sents)
+        print(f"DEBUG: Paragraph {para_idx} -> {len(para_sentences)} sentences")
+
+        for inner_idx, sent in enumerate(para_sentences):
+            global_sent_idx = len(sentences)  # 用全局序号生成 token_id
+
+            layout_info = {
+                "is_new_paragraph": inner_idx == 0,  # 每个段落里的第一句标记为新段落
+                "indent_level": 0
+            }
+
+            spacy_tokens = list(sent)
+            merged_tokens = []
+
+            for token in spacy_tokens:
+                if token.is_space:
+                    continue
+
+                should_merge = False
+                if merged_tokens:
+                    text_lower = token.text.lower()
+                    if text_lower in suffixes:
+                        should_merge = True
+
+                if should_merge:
+                    prev_token = merged_tokens[-1]
+                    prev_token["text"] += token.text
+                    prev_token["end"] = offset + token.idx + len(token.text)
+                    prev_token["has_space_after"] = bool(token.whitespace_)
+                else:
+                    global_start = offset + token.idx
+                    global_end = global_start + len(token.text)
+
+                    token_data = {
+                        "token_id": f"sent-{global_sent_idx}-token-{len(merged_tokens)}",
+                        "text": token.text,
+                        "lemma": token.lemma_,
+                        "pos": token.pos_,
+                        "tag": token.tag_,
+                        "dep": token.dep_,
+                        "start": global_start,
+                        "end": global_end,
+                        "has_space_after": bool(token.whitespace_),
+                    }
+
+                    if word_map:
+                        matched_rects = []
+                        t_start, t_end = global_start, global_end
+
+                        for wm in word_map:
+                            if max(t_start, wm["start"]) < min(t_end, wm["end"]):
+                                matched_rects.append(wm)
+
+                        if matched_rects:
+                            page_idx = matched_rects[0]["page"]
+                            x0 = min(r["bbox"]["x0"] for r in matched_rects)
+                            top = min(r["bbox"]["top"] for r in matched_rects)
+                            x1 = max(r["bbox"]["x1"] for r in matched_rects)
+                            bottom = max(r["bbox"]["bottom"] for r in matched_rects)
+
+                            token_data["bbox"] = {
+                                "page": page_idx,
+                                "x0": x0,
+                                "top": top,
+                                "x1": x1,
+                                "bottom": bottom,
+                                "width": x1 - x0,
+                                "height": bottom - top,
+                            }
+
+                    merged_tokens.append(token_data)
+
             if merged_tokens:
-                text_lower = token.text.lower()
-                if text_lower in suffixes:
-                     should_merge = True
-            
-            if should_merge:
-                prev_token = merged_tokens[-1]
-                prev_token['text'] += token.text
-                prev_token['end'] = token.idx + len(token.text)
-                prev_token['has_space_after'] = bool(token.whitespace_)
-            else:
-                token_data = {
-                    "token_id": f"sent-{sent_idx}-token-{len(merged_tokens)}",
-                    "text": token.text,
-                    "lemma": token.lemma_,
-                    "pos": token.pos_,
-                    "tag": token.tag_,
-                    "dep": token.dep_,
-                    "start": token.idx,
-                    "end": token.idx + len(token.text),
-                    "has_space_after": bool(token.whitespace_)
-                }
-                
-                if word_map:
-                    matched_rects = []
-                    t_start, t_end = token.idx, token.idx + len(token.text)
-                    
-                    for wm in word_map:
-                        if max(t_start, wm['start']) < min(t_end, wm['end']):
-                            matched_rects.append(wm)
-                            
-                    if matched_rects:
-                        page_idx = matched_rects[0]['page']
-                        x0 = min(r['bbox']['x0'] for r in matched_rects)
-                        top = min(r['bbox']['top'] for r in matched_rects)
-                        x1 = max(r['bbox']['x1'] for r in matched_rects)
-                        bottom = max(r['bbox']['bottom'] for r in matched_rects)
-                        
-                        token_data['bbox'] = {
-                            "page": page_idx,
-                            "x0": x0, 
-                            "top": top,
-                            "x1": x1,
-                            "bottom": bottom,
-                            "width": x1 - x0,
-                            "height": bottom - top
-                        }
+                sentences.append(
+                    {
+                        "text": sent.text,
+                        "start": offset + sent.start_char,
+                        "end": offset + sent.end_char,
+                        "layout": layout_info,
+                        "tokens": merged_tokens,
+                    }
+                )
 
-                merged_tokens.append(token_data)
-        
-        if merged_tokens:
-            sentences.append({
-                "text": sent.text,
-                "start": sent.start_char,
-                "end": sent.end_char,
-                "layout": layout_info,
-                "tokens": merged_tokens
-            })
+        # 本段在原文中占用的长度：段落内容 + 之前的 \n\n（这里简化用 +2）
+        offset += len(para_text) + 2
 
     return {"sentences": sentences}
 
@@ -308,6 +303,7 @@ async def upload_file(file: UploadFile = File(...)):
     word_map = None
     pages_meta = []
     file_url = ""
+    source_type = "other"
     
     try:
         if filename.endswith(".pdf"):
@@ -322,13 +318,17 @@ async def upload_file(file: UploadFile = File(...)):
             file_url = f"http://127.0.0.1:8000/static/uploads/{safe_name}"
 
             text, word_map, pages_meta = parse_pdf(content)
+            source_type = "pdf"
         elif filename.endswith(".docx"):
             text = parse_docx(content)
+            source_type = "docx"
         elif filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
             # Use local OCR Service (PaddleOCR)
             text = ocr_service.parse_image(content)
+            source_type = "image"
         elif filename.endswith(".txt"):
             text = content.decode("utf-8")
+            source_type = "txt"
         else:
             raise HTTPException(status_code=400, detail="不支持的文件格式")
             
@@ -340,11 +340,13 @@ async def upload_file(file: UploadFile = File(...)):
         else:
             # Process based on file type
             if filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                # For images: normalize paragraph markers (K), L), M), N), etc.)
-                final_text = normalize_image_paragraphs(text)
-                # DEBUG: Check if paragraph breaks are present
+                # 图片 OCR：保留段落(\n\n)，但把段落内部的单行换行合并成空格
+                # 这样“整段”内容不会被拆成多行，但段落边界仍然保留
+                final_text = clean_text(text)
+                # DEBUG: Check if paragraph breaks are present after cleaning
                 para_count = final_text.count('\n\n')
-                print(f"DEBUG: After normalize_image_paragraphs - {para_count} paragraph breaks (\\n\\n)")
+                line_count = final_text.count('\n') - para_count * 2
+                print(f"DEBUG: Image OCR text - {para_count} paragraphs, {line_count} line breaks")
                 print(f"DEBUG: Text preview: {final_text[:300]}...")
             else:
                 # For other files: apply basic clean
@@ -352,8 +354,11 @@ async def upload_file(file: UploadFile = File(...)):
             
         result = process_text(final_text, word_map=word_map)
         
+        # 附加原始文本与元信息，前端可选择直接按原始换行渲染
+        result["raw_text"] = final_text
         result["file_url"] = file_url
         result["pages"] = pages_meta
+        result["source_type"] = source_type
         return result
 
     except Exception as e:

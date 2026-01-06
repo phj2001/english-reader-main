@@ -24,3 +24,97 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Drag and Drop Styles */
+.drag-drop-zone {
+  transition: all 0.3s ease;
+}
+
+.drag-drop-zone.drag-over {
+  border-color: #3b82f6 !important;
+  border-width: 2px !important;
+  background-color: rgba(59, 130, 246, 0.05);
+  transform: scale(1.02);
+}
+
+.drag-drop-zone.drag-over::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(99, 102, 241, 0.1));
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* OCR Processing Animation */
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.ocr-loading {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(59, 130, 246, 0.1) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  background-size: 1000px 100%;
+  animation: shimmer 2s infinite;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.paragraph-fade-in {
+  animation: fadeInUp 0.6s ease-out;
+}
+
+/* File type badges */
+.file-type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.file-type-badge.pdf {
+  background: rgba(239, 68, 68, 0.1);
+  color: #dc2626;
+}
+
+.file-type-badge.image {
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+}
+
+.file-type-badge.document {
+  background: rgba(16, 185, 129, 0.1);
+  color: #059669;
+}
+
+/* Improved paragraph spacing for OCR text */
+.ocr-text p {
+  margin-bottom: 1.5em;
+  line-height: 1.9;
+}
+
+.ocr-text p:last-child {
+  margin-bottom: 0;
+}

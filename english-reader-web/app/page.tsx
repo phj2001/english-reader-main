@@ -66,23 +66,32 @@ export default function HomePage() {
   } | null>(null);
   
   const [loading, setLoading] = useState(false);
-  const [fontSize, setFontSize] = useState(20); 
+  const [fontSize, setFontSize] = useState(20);
+  const [isDragging, setIsDragging] = useState(false);
+  const [uploadingFileName, setUploadingFileName] = useState<string>(''); 
 
   // PDF 相关状态
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [pdfPages, setPdfPages] = useState<{page_idx: number, width: number, height: number}[]>([]);
+  const [rawText, setRawText] = useState<string | null>(null);
+  const [sourceType, setSourceType] = useState<string | null>(null);
+  // 去除多余空行后的文本（只保留单个换行）
+  const normalizedRawText = rawText
+    ? rawText.replace(/\n\s*\n+/g, '\n')
+    : null;
 
 
   /* =======================
    * 1. 核心逻辑：文件上传与处理
    * ======================= */
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>, mode: 'replace' | 'append' = 'replace') => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
+  const processFile = async (file: File, mode: 'replace' | 'append' = 'replace') => {
     setLoading(true);
+    setUploadingFileName(file.name);
+    
     if (mode === 'replace') {
         setSentences([]); // 清空旧内容
+        setRawText(null);
+        setSourceType(null);
     }
 
     const formData = new FormData();
@@ -106,6 +115,8 @@ export default function HomePage() {
           setSentences(newSentences);
           setFileUrl(data.file_url || null);
           setPdfPages(data.pages || []);
+          setRawText(data.raw_text || null);
+          setSourceType(data.source_type || null);
       } else {
            // append logic (简单处理，暂不支持 PDF append)
            if (newSentences.length > 0) {
@@ -118,14 +129,57 @@ export default function HomePage() {
            }
       }
       
-      // 清空 input value
-      event.target.value = '';
-
     } catch (err: any) {
       console.error(err);
       alert(`解析失败: ${err.message}`);
     } finally {
       setLoading(false);
+      setUploadingFileName('');
+    }
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>, mode: 'replace' | 'append' = 'replace') => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    
+    await processFile(file, mode);
+    
+    // 清空 input value
+    event.target.value = '';
+  };
+
+  // Drag and Drop handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      const file = files[0];
+      
+      // Validate file type
+      const validTypes = ['.pdf', '.docx', '.txt', '.jpg', '.jpeg', '.png', '.webp'];
+      const fileExt = '.' + file.name.split('.').pop()?.toLowerCase();
+      
+      if (!validTypes.includes(fileExt)) {
+        alert('不支持的文件格式。请上传 PDF、Word、文本或图片文件。');
+        return;
+      }
+      
+      await processFile(file, 'replace');
     }
   };
 
@@ -173,6 +227,71 @@ export default function HomePage() {
     } catch (err) {
       setWordPopup(null);
     }
+  };
+
+  /** =======================
+   * 3.5 原始文本模式下的单词点击（用于图片 OCR，直接按换行渲染）
+   * ======================= */
+  const handleRawTextClick = (e: React.MouseEvent) => {
+    // 如果正在划选，用于句子翻译，则不触发单词解释
+    const selection = window.getSelection();
+    if (selection && selection.toString().trim().length > 0) {
+      return;
+    }
+
+    let range: Range | null = null;
+    let textNode: Node | null = null;
+    let offset = 0;
+
+    if (document.caretRangeFromPoint) {
+      range = document.caretRangeFromPoint(e.clientX, e.clientY);
+      if (range) {
+        textNode = range.startContainer;
+        offset = range.startOffset;
+      }
+    } else if ((document as any).caretPositionFromPoint) {
+      const pos = (document as any).caretPositionFromPoint(e.clientX, e.clientY);
+      if (pos) {
+        textNode = pos.offsetNode;
+        offset = pos.offset;
+      }
+    }
+
+    if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return;
+
+    const textContent = textNode.textContent || '';
+    const isWordChar = (char: string) => /[A-Za-z0-9'\-]/.test(char);
+
+    let start = offset;
+    while (start > 0 && isWordChar(textContent[start - 1])) start--;
+
+    let end = offset;
+    while (end < textContent.length && isWordChar(textContent[end])) end++;
+
+    const clickedWord = textContent.slice(start, end);
+    if (!clickedWord.trim()) return;
+
+    // 取当前行作为句子上下文（基于最近的换行）
+    const full = rawText || '';
+    const absoluteIndex = full.indexOf(textContent);
+    let lineText = textContent;
+
+    if (absoluteIndex >= 0) {
+      const lineStart = full.lastIndexOf('\n', absoluteIndex);
+      const lineEnd = full.indexOf('\n', absoluteIndex + textContent.length);
+      lineText = full.slice(
+        lineStart === -1 ? 0 : lineStart + 1,
+        lineEnd === -1 ? full.length : lineEnd
+      );
+    }
+
+    const dummyToken: Token = {
+      token_id: `raw-${Date.now()}`,
+      text: clickedWord,
+      has_space_after: true,
+    };
+
+    handleTokenClick(dummyToken, lineText, e);
   };
 
   /** =======================
@@ -303,10 +422,15 @@ export default function HomePage() {
       <main className="max-w-4xl mx-auto px-4 mt-8">
         
         {/* 阅读卡片 */}
-        <div 
-          className="bg-white rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] min-h-[80vh] border border-gray-100 transition-all duration-300"
-          onMouseUp={handleMouseUp}
-        >
+         <div 
+           className={`bg-white rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] min-h-[80vh] border border-gray-100 transition-all duration-300 drag-drop-zone relative ${
+             isDragging ? 'drag-over' : ''
+           }`}
+           onMouseUp={handleMouseUp}
+           onDragOver={handleDragOver}
+           onDragLeave={handleDragLeave}
+           onDrop={handleDrop}
+         >
            {/* 空状态 / 初始引导 */}
            {sentences.length === 0 && !loading && (
              <div className="flex flex-col items-center justify-center py-32 px-6 text-center animate-in fade-in zoom-in duration-500">
@@ -338,28 +462,70 @@ export default function HomePage() {
 
            {/* 加载状态 */}
            {loading && sentences.length === 0 && (
-             <div className="flex flex-col items-center justify-center py-40 text-gray-400 gap-4">
-                <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600"></div>
-                <p className="animate-pulse text-sm font-medium">Loading content...</p>
+             <div className="flex flex-col items-center justify-center py-40 text-gray-400 gap-6">
+                <div className="relative">
+                  <div className="animate-spin rounded-full h-16 w-16 border-4 border-gray-200 border-t-blue-600"></div>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    {uploadingFileName.match(/\.(jpg|jpeg|png|webp)$/i) ? (
+                      <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    )}
+                  </div>
+                </div>
+                <div className="text-center">
+                  <p className="text-sm font-medium text-gray-700 mb-1">
+                    {uploadingFileName.match(/\.(jpg|jpeg|png|webp)$/i) 
+                      ? '🔍 正在识别图片文字...' 
+                      : '📖 正在加载文档...'}
+                  </p>
+                  <p className="text-xs text-gray-500">{uploadingFileName}</p>
+                  {uploadingFileName.match(/\.(jpg|jpeg|png|webp)$/i) && (
+                    <div className="mt-3 px-4 py-2 bg-blue-50 rounded-lg inline-block">
+                      <p className="text-xs text-blue-700 font-medium">使用 Tesseract OCR 引擎</p>
+                      <p className="text-xs text-blue-600">正在分析段落结构...</p>
+                    </div>
+                  )}
+                </div>
              </div>
            )}
 
            {/* 文章内容 */}
-            {sentences.length > 0 && (
-                fileUrl && fileUrl.endsWith('.pdf') ? (
+           {sentences.length > 0 && (
+               fileUrl && fileUrl.endsWith('.pdf') ? (
                     <PDFViewer 
                         fileUrl={fileUrl}
                         pdfPages={pdfPages}
                         sentences={sentences}
                         onTokenClick={(token, sentText, e) => handleTokenClick(token, sentText, e)}
                     />
+                ) : sourceType === 'image' && normalizedRawText ? (
+                  // 图片 OCR：直接按原始文本换行渲染，100% 复刻后端 OCR 的排版
+                  <pre
+                    className="px-8 py-10 sm:px-12 sm:py-16 selection:bg-blue-100 selection:text-blue-900 ocr-text"
+                    style={{
+                      fontFamily: '"Times New Roman", "Georgia", "SimSun", serif',
+                      fontSize: fontSize,
+                      lineHeight: 1.9,
+                      whiteSpace: 'pre-wrap',
+                      overflowWrap: 'normal',
+                      wordBreak: 'normal',
+                    }}
+                    onClick={handleRawTextClick}
+                  >
+                    {normalizedRawText}
+                  </pre>
                 ) : (
                   <article 
-                    className="px-8 py-10 sm:px-12 sm:py-16 selection:bg-blue-100 selection:text-blue-900"
+                    className="px-8 py-10 sm:px-12 sm:py-16 selection:bg-blue-100 selection:text-blue-900 ocr-text"
                     style={{
-                      fontFamily: '"Times New Roman", "SimSun", serif',
+                      fontFamily: '"Times New Roman", "Georgia", "SimSun", serif',
                       fontSize: fontSize,
-                      lineHeight: 1.8,
+                      lineHeight: 1.9,
                       overflowWrap: 'normal',
                       wordBreak: 'normal'
                     }}
@@ -373,7 +539,8 @@ export default function HomePage() {
                           key={i} 
                           style={{ 
                             display: isNewPara ? 'block' : 'inline',
-                            marginTop: isNewPara ? '1.5em' : 0, 
+                            // 段落首行：只换行，不再额外插入整行空白
+                            marginTop: 0,
                             paddingLeft: isNewPara && indentLevel > 0 ? `${indentLevel * 2}em` : 0
                           }}
                         >

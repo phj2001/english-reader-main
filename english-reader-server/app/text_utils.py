@@ -65,6 +65,20 @@ def normalize_image_paragraphs(text: str) -> str:
 
     normalized = "\n".join(new_lines)
 
+    # 第三步：修复“小节标记单独一行”导致的多余换行
+    # 例如：
+    #   K)
+    #   The research of Gigi Luk...
+    # 实际想要：
+    #   K) The research of Gigi Luk...
+    # 因此将「题号行 + 换行 + 下一行正文」合并成一行
+    normalized = re.sub(
+        r'^([A-Z]\))\s*\n\s*',   # 行首的 K)/L)/M)/N) + 换行
+        r'\1 ',                  # 合并成同一行，并在后面加一个空格
+        normalized,
+        flags=re.MULTILINE,
+    )
+
     # 第二轮：处理出现在同一行中、跟在句号/问号/引号后面的题号
     # 例如： ... cornerstone of comprehension. "L) How did ...
     # 在这种模式下，我们在标点之后、题号之前插入两个换行符
