@@ -14,6 +14,7 @@ import re
 from .db import get_conn, init_cache, DB_PATH
 from .text_utils import clean_text, normalize_image_paragraphs, decode_escaped_newlines
 from .ai_service import GeminiService
+from .ocr_service import OCRService
 
 # =========================
 # 1️⃣ 环境变量 & 基础配置
@@ -30,6 +31,7 @@ os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 ai_service = GeminiService(api_key=GEMINI_API_KEY)
+ocr_service = OCRService()
 
 # =========================
 # 2️⃣ FastAPI 初始化
@@ -178,26 +180,45 @@ def parse_docx(file_bytes: bytes) -> str:
 def process_text(raw_text: str, word_map=None):
     """
     文本结构化核心逻辑
+    Enhanced to detect <<<PARAGRAPH_BREAK>>> markers from OCR for accurate layout preservation.
     """
     doc = nlp(raw_text)
     sentences = []
     
     all_sentences = list(doc.sents)
-
+    
+    # DEBUG: Print sentence count and first few sentence starts
+    print(f"DEBUG: spaCy detected {len(all_sentences)} sentences")
+    paragraph_markers_in_text = raw_text.count('<<<PARAGRAPH_BREAK>>>')
+    print(f"DEBUG: Paragraph markers in text: {paragraph_markers_in_text}")
+    for i, s in enumerate(all_sentences[:6]):
+        print(f"DEBUG: Sentence {i}: start={s.start_char}, text='{s.text[:60]}...'")
+    
     for sent_idx, sent in enumerate(all_sentences):
         layout_info = {
             "is_new_paragraph": False,
             "indent_level": 0
         }
         
+        # First sentence is always a new paragraph
         if sent_idx == 0:
             layout_info["is_new_paragraph"] = True
         else:
             prev_sent_end = all_sentences[sent_idx-1].end_char if sent_idx > 0 else 0
             gap_text = raw_text[prev_sent_end : sent.start_char]
             
-            if '\n\n' in gap_text or gap_text.count('\n') >= 2:
+            # Check for unique paragraph marker (most reliable)
+            if '<<<PARAGRAPH_BREAK>>>' in gap_text:
                 layout_info["is_new_paragraph"] = True
+                print(f"DEBUG: PARAGRAPH MARKER detected before sentence {sent_idx}: '{sent.text[:50]}...'")
+            # Also check if the sentence itself starts with the marker (in case spaCy merged it)
+            elif sent.text.strip().startswith('<<<PARAGRAPH_BREAK>>>'):
+                layout_info["is_new_paragraph"] = True
+                print(f"DEBUG: PARAGRAPH MARKER at sentence start {sent_idx}: '{sent.text[:50]}...'")
+            # Fallback: traditional newline detection
+            elif '\n\n' in gap_text or gap_text.count('\n') >= 2:
+                layout_info["is_new_paragraph"] = True
+                print(f"DEBUG: Paragraph break (fallback) detected before sentence {sent_idx}: '{sent.text[:50]}...'")
             
         spacy_tokens = list(sent)
         merged_tokens = []
@@ -206,6 +227,10 @@ def process_text(raw_text: str, word_map=None):
 
         for token in spacy_tokens:
             if token.is_space: continue
+            
+            # Skip paragraph break markers - they're only for layout detection
+            if '<<<PARAGRAPH_BREAK>>>' in token.text:
+                continue
             
             should_merge = False
             if merged_tokens:
@@ -300,10 +325,8 @@ async def upload_file(file: UploadFile = File(...)):
         elif filename.endswith(".docx"):
             text = parse_docx(content)
         elif filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
-            raw_image_text = ai_service.parse_image_content(content, file.content_type or "image/jpeg")
-            # Apply image specific normalization
-            normalized_text = normalize_image_paragraphs(raw_image_text)
-            text = ai_service.fix_text_layout(normalized_text, is_image=True)
+            # Use local OCR Service (PaddleOCR)
+            text = ocr_service.parse_image(content)
         elif filename.endswith(".txt"):
             text = content.decode("utf-8")
         else:
@@ -315,11 +338,17 @@ async def upload_file(file: UploadFile = File(...)):
         if word_map:
             final_text = text
         else:
-            # Only apply basic clean if not image (images already processed)
-            if not filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                 final_text = clean_text(text)
+            # Process based on file type
+            if filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
+                # For images: normalize paragraph markers (K), L), M), N), etc.)
+                final_text = normalize_image_paragraphs(text)
+                # DEBUG: Check if paragraph breaks are present
+                para_count = final_text.count('\n\n')
+                print(f"DEBUG: After normalize_image_paragraphs - {para_count} paragraph breaks (\\n\\n)")
+                print(f"DEBUG: Text preview: {final_text[:300]}...")
             else:
-                 final_text = text
+                # For other files: apply basic clean
+                final_text = clean_text(text)
             
         result = process_text(final_text, word_map=word_map)
         
