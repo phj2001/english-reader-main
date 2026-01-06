@@ -12,7 +12,7 @@ import io
 import re
 
 from .db import get_conn, init_cache, DB_PATH
-from .text_utils import clean_text, normalize_image_paragraphs, decode_escaped_newlines
+from .text_utils import clean_text, normalize_image_paragraphs, decode_escaped_newlines, normalize_exam_like_image
 from .ai_service import GeminiService
 from .ocr_service import OCRService
 
@@ -173,9 +173,26 @@ def parse_pdf(file_bytes: bytes):
         return clean_text(text), None, []
 
 def parse_docx(file_bytes: bytes) -> str:
+    """
+    解析 Word 文档，尽量保留原始段落布局：
+    - 每个 Word 段落之间使用两个换行符 \\n\\n 分隔（对应前端中的“新段落”）
+    - 段落内部不做任何换行合并，保持与原文一致
+    - 不再调用 clean_text，避免误删空行或合并段落
+    """
     doc = docx.Document(io.BytesIO(file_bytes))
-    text = "\n".join([para.text for para in doc.paragraphs])
-    return clean_text(text)
+    paragraphs: list[str] = []
+
+    for para in doc.paragraphs:
+        # para.text 已经把该段落内的 run 合并，包含手动换行符
+        text = para.text
+        if text is None:
+            continue
+        # 保留段内空格，只去掉段尾多余空白
+        paragraphs.append(text.rstrip())
+
+    # 使用 \\n\\n 作为段落分隔符，方便后续 process_text 按自然段切分
+    joined = "\n\n".join(p for p in paragraphs)
+    return joined.strip()
 
 def process_text(raw_text: str, word_map=None):
     """
@@ -340,16 +357,21 @@ async def upload_file(file: UploadFile = File(...)):
         else:
             # Process based on file type
             if filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                # 图片 OCR：保留段落(\n\n)，但把段落内部的单行换行合并成空格
-                # 这样“整段”内容不会被拆成多行，但段落边界仍然保留
+                # 图片 OCR：先做通用清理，再对“试卷类”结构做轻量排版修正
+                # 1) clean_text: 合并段内硬回车，只保留真正段落
                 final_text = clean_text(text)
+                # 2) 如果检测到 17.A)、19.B) 这类题号结构，再做专门的排版优化
+                final_text = normalize_exam_like_image(final_text)
                 # DEBUG: Check if paragraph breaks are present after cleaning
                 para_count = final_text.count('\n\n')
                 line_count = final_text.count('\n') - para_count * 2
                 print(f"DEBUG: Image OCR text - {para_count} paragraphs, {line_count} line breaks")
                 print(f"DEBUG: Text preview: {final_text[:300]}...")
+            elif filename.endswith(".docx"):
+                # Word 文本已经在 parse_docx 中组织好段落与换行，这里直接使用
+                final_text = text
             else:
-                # For other files: apply basic clean
+                # 其它纯文本类（txt 等），做一次基础清理
                 final_text = clean_text(text)
             
         result = process_text(final_text, word_map=word_map)

@@ -44,6 +44,41 @@ def decode_escaped_newlines(text: str) -> str:
     text = text.replace("\\n", "\n")
     return text
 
+def normalize_exam_like_image(text: str) -> str:
+    """
+    针对英语考试卷这类“题号 + 选项”的图片 OCR 结果，做一些轻量的排版修正，
+    仅在检测到明显的客观题模式时启用，避免影响其它正常图片：
+
+    - 题号常见模式：17.A)、19.B) 等，即 `数字+点+大写字母+右括号`
+    - 优化点：
+      * 每个题号前强制换行
+      * 每个选项 A)/B)/C)/D) 强制换行
+    """
+    # 如果文本里没有类似 "17.A)" 这样的结构，则直接返回，避免影响普通图片
+    if not re.search(r'\b\d{1,2}\.[A-D]\)', text):
+        return text
+
+    normalized = text
+
+    # 1) 确保每个题号（如 17.A)）独占一行开头
+    # 任意空白 + 题号 => 换成换行 + 题号
+    normalized = re.sub(
+        r'\s*(\d{1,2}\.[A-D]\))',
+        r'\n\1',
+        normalized
+    )
+
+    # 2) 确保题目内部的选项 A)/B)/C)/D) 也从新的一行开始
+    normalized = re.sub(
+        r'\s([A-D]\))',
+        r'\n\1',
+        normalized
+    )
+
+    # 3) 防止出现多余的连续空行：把 3 行以上的空行压成最多 1 个空白行
+    normalized = re.sub(r'\n\s*\n\s*\n+', '\n\n', normalized)
+
+    return normalized.strip()
 def normalize_image_paragraphs(text: str) -> str:
     """
     针对图片 OCR 文本的一些段落修正：

@@ -44,6 +44,9 @@ type ExplainResult = {
   confidence: number;
 };
 
+// 用于标记不同图片之间的分隔（仅在 rawText 内部使用）
+const IMAGE_SPLIT_MARK = '<<__IMG_SPLIT__>>';
+
 export default function HomePage() {
   /** =======================
    * State 定义
@@ -75,9 +78,17 @@ export default function HomePage() {
   const [pdfPages, setPdfPages] = useState<{page_idx: number, width: number, height: number}[]>([]);
   const [rawText, setRawText] = useState<string | null>(null);
   const [sourceType, setSourceType] = useState<string | null>(null);
-  // 去除多余空行后的文本（只保留单个换行）
+  // 归一化空行：
+  // - 段内：把任意连续空行压缩为 1 个换行（不留空白行）
+  // - 不同图片之间：通过特殊标记 IMAGE_SPLIT_MARK 保留 1 个空白行
   const normalizedRawText = rawText
-    ? rawText.replace(/\n\s*\n+/g, '\n')
+    ? rawText
+        // 先把图片分隔标记替换为占位符，防止被下面的正则吃掉
+        .replace(new RegExp(`\\n${IMAGE_SPLIT_MARK}\\n`, 'g'), '\n<SPLIT>\n')
+        // 段落内部：把连续多个换行压缩为单个换行（不出现空白行）
+        .replace(/\n\s*\n+/g, '\n')
+        // 最后把占位符还原成真正的“空一行”（两个换行）
+        .replace(/\n<SPLIT>\n/g, '\n\n')
     : null;
 
 
@@ -115,8 +126,16 @@ export default function HomePage() {
           setSentences(newSentences);
           setFileUrl(data.file_url || null);
           setPdfPages(data.pages || []);
-          setRawText(data.raw_text || null);
           setSourceType(data.source_type || null);
+
+          // 对于首个文件：
+          // - 图片 / 纯文本：使用 raw_text 作为主体内容
+          // - PDF / Word：只使用各自的专用渲染方式，不在 rawText 中重复一份
+          if (data.source_type === 'image' || data.source_type === 'txt') {
+            setRawText(data.raw_text || null);
+          } else {
+            setRawText(null);
+          }
       } else {
            // append logic (简单处理，暂不支持 PDF append)
            if (newSentences.length > 0) {
@@ -126,6 +145,21 @@ export default function HomePage() {
                    newSentences[0].layout.is_new_paragraph = true;
                }
                setSentences(prev => [...prev, ...newSentences]);
+           }
+
+           // 对于带有 raw_text 的文件（图片、txt、docx 等）：
+           // 将新内容追加到已有 rawText 后面，用于在 PDF/首个文档之后的新“页面”展示
+          if (data.raw_text) {
+            // 追加文件时：如果已经有 sourceType（例如首个是 image），就保持原类型，
+            // 避免因为后续追加 Word 而切换渲染模式导致图片间的分隔行消失
+            setSourceType(prev => prev || data.source_type || sourceType);
+             setRawText(prev => {
+               if (!prev) return data.raw_text;
+               const trimmedPrev = prev.replace(/\s+$/, '');
+               const trimmedNew = (data.raw_text as string).replace(/^\s+/, '');
+               // 使用专用分隔标记，之后在 normalizedRawText 中把它渲染为“空一行”
+               return `${trimmedPrev}\n${IMAGE_SPLIT_MARK}\n${trimmedNew}`;
+             });
            }
       }
       
@@ -497,12 +531,31 @@ export default function HomePage() {
            {/* 文章内容 */}
            {sentences.length > 0 && (
                fileUrl && fileUrl.endsWith('.pdf') ? (
+                 <>
                     <PDFViewer 
                         fileUrl={fileUrl}
                         pdfPages={pdfPages}
                         sentences={sentences}
                         onTokenClick={(token, sentText, e) => handleTokenClick(token, sentText, e)}
                     />
+                    {/* 如果通过 Open Next 追加了图片/文档，则在 PDF 下方以新的一页形式展示 */}
+                    {normalizedRawText && (
+                      <pre
+                        className="px-8 py-10 sm:px-12 sm:py-16 selection:bg-blue-100 selection:text-blue-900 ocr-text border-t border-gray-100 mt-8"
+                        style={{
+                          fontFamily: '"Times New Roman", "Georgia", "SimSun", serif',
+                          fontSize: fontSize,
+                          lineHeight: 1.9,
+                          whiteSpace: 'pre-wrap',
+                          overflowWrap: 'normal',
+                          wordBreak: 'normal',
+                        }}
+                        onClick={handleRawTextClick}
+                      >
+                        {normalizedRawText}
+                      </pre>
+                    )}
+                 </>
                 ) : sourceType === 'image' && normalizedRawText ? (
                   // 图片 OCR：直接按原始文本换行渲染，100% 复刻后端 OCR 的排版
                   <pre
