@@ -14,8 +14,8 @@ import tempfile
 from docx2pdf import convert as docx2pdf_convert
 
 from .db import get_conn, init_cache, DB_PATH
-from .text_utils import clean_text, normalize_image_paragraphs, decode_escaped_newlines, normalize_exam_like_image
-from .ai_service import GeminiService
+from .text_utils import clean_text, decode_escaped_newlines, normalize_exam_like_image
+from .ai_service import AIService, GeminiService
 from .ocr_service import OCRService
 
 # =========================
@@ -26,13 +26,42 @@ BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
 
-# 代理（如不需要可删除）
-os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
-os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+# 代理配置（如不需要可在 .env 中设置 USE_PROXY=false）
+if os.getenv("USE_PROXY", "true").lower() == "true":
+    os.environ["HTTP_PROXY"] = os.getenv("HTTP_PROXY", "http://127.0.0.1:7897")
+    os.environ["HTTPS_PROXY"] = os.getenv("HTTPS_PROXY", "http://127.0.0.1:7897")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# ============================================
+# ✏️ AI 模型配置 - 在 .env 文件中修改
+# ============================================
+# 
+# AI_PROVIDER: 选择使用的 AI 服务提供商
+#   - "gemini"  : Google Gemini (使用原生 SDK)
+#   - "openai"  : OpenAI 兼容 API (豆包、通义、DeepSeek 等)
+#
+# 如果使用 Gemini:
+#   GEMINI_API_KEY=你的API密钥
+#   GEMINI_MODEL_NAME=gemini-1.5-flash
+#
+# 如果使用 OpenAI 兼容 API (豆包/通义/DeepSeek 等):
+#   AI_API_KEY=你的API密钥
+#   AI_BASE_URL=https://api.example.com/v1
+#   AI_MODEL_NAME=模型名称
+#
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini")
 
-ai_service = GeminiService(api_key=GEMINI_API_KEY)
+if AI_PROVIDER == "gemini":
+    # 使用 Google Gemini
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME")
+    ai_service = GeminiService(api_key=GEMINI_API_KEY, model_name=GEMINI_MODEL_NAME)
+else:
+    # 使用 OpenAI 兼容 API (豆包、通义、DeepSeek、OpenAI 等)
+    AI_API_KEY = os.getenv("AI_API_KEY")
+    AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
+    AI_MODEL_NAME = os.getenv("AI_MODEL_NAME")
+    ai_service = AIService(api_key=AI_API_KEY, base_url=AI_BASE_URL, model_name=AI_MODEL_NAME)
+
 ocr_service = OCRService()
 
 # =========================
@@ -174,27 +203,6 @@ def parse_pdf(file_bytes: bytes):
             if t: text += t + "\n"
         return clean_text(text), None, []
 
-def parse_docx(file_bytes: bytes) -> str:
-    """
-    解析 Word 文档，尽量保留原始段落布局：
-    - 每个 Word 段落之间使用两个换行符 \\n\\n 分隔（对应前端中的“新段落”）
-    - 段落内部不做任何换行合并，保持与原文一致
-    - 不再调用 clean_text，避免误删空行或合并段落
-    """
-    doc = docx.Document(io.BytesIO(file_bytes))
-    paragraphs: list[str] = []
-
-    for para in doc.paragraphs:
-        # para.text 已经把该段落内的 run 合并，包含手动换行符
-        text = para.text
-        if text is None:
-            continue
-        # 保留段内空格，只去掉段尾多余空白
-        paragraphs.append(text.rstrip())
-
-    # 使用 \\n\\n 作为段落分隔符，方便后续 process_text 按自然段切分
-    joined = "\n\n".join(p for p in paragraphs)
-    return joined.strip()
 
 def process_text(raw_text: str, word_map=None):
     """
