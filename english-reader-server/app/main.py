@@ -10,6 +10,8 @@ import pdfplumber
 import docx
 import io
 import re
+import tempfile
+from docx2pdf import convert as docx2pdf_convert
 
 from .db import get_conn, init_cache, DB_PATH
 from .text_utils import clean_text, normalize_image_paragraphs, decode_escaped_newlines, normalize_exam_like_image
@@ -321,6 +323,7 @@ async def upload_file(file: UploadFile = File(...)):
     pages_meta = []
     file_url = ""
     source_type = "other"
+    docx_image_ocr_texts = []  # 用于存储 Word 文档中图片的 OCR 结果
     
     try:
         if filename.endswith(".pdf"):
@@ -337,8 +340,82 @@ async def upload_file(file: UploadFile = File(...)):
             text, word_map, pages_meta = parse_pdf(content)
             source_type = "pdf"
         elif filename.endswith(".docx"):
-            text = parse_docx(content)
-            source_type = "docx"
+            # ✨ 新方案：将 Word 转换为 PDF，复用 PDF 渲染逻辑以保持完美格式
+            # 同时提取 Word 中的图片进行 OCR，让图片中的文字也可以点击查词
+            print("DEBUG: Converting Word document to PDF for native rendering...")
+            
+            # Ensure uploads directory exists
+            (STATIC_DIR / "uploads").mkdir(exist_ok=True)
+            
+            # 用于存储 Word 中图片的 OCR 结果
+            docx_image_ocr_texts = []
+            
+            # 1. 将 docx 保存到临时目录
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                docx_path = Path(tmp_dir) / "input.docx"
+                pdf_path = Path(tmp_dir) / "input.pdf"
+                
+                with open(docx_path, "wb") as f:
+                    f.write(content)
+                
+                # 1.5 提取 Word 中的所有图片并进行 OCR
+                try:
+                    doc = docx.Document(io.BytesIO(content))
+                    image_count = 0
+                    
+                    # 遍历文档中的所有关系，找到图片
+                    for rel in doc.part.rels.values():
+                        if "image" in rel.target_ref:
+                            try:
+                                image_data = rel.target_part.blob
+                                image_count += 1
+                                print(f"DEBUG: Found embedded image #{image_count}, size: {len(image_data)} bytes")
+                                
+                                # 对图片进行 OCR
+                                ocr_text = ocr_service.parse_image(image_data)
+                                if ocr_text and ocr_text.strip():
+                                    # 与直接上传图片一致：应用 clean_text 和 normalize_exam_like_image 处理
+                                    processed_ocr = clean_text(ocr_text)
+                                    processed_ocr = normalize_exam_like_image(processed_ocr)
+                                    
+                                    docx_image_ocr_texts.append({
+                                        "image_index": image_count,
+                                        "ocr_text": processed_ocr.strip()
+                                    })
+                                    print(f"DEBUG: OCR result for image #{image_count}: {processed_ocr[:100]}...")
+                            except Exception as img_err:
+                                print(f"WARNING: Failed to OCR image #{image_count}: {img_err}")
+                    
+                    print(f"DEBUG: Extracted and OCR'd {len(docx_image_ocr_texts)} images from Word document")
+                except Exception as extract_err:
+                    print(f"WARNING: Image extraction failed: {extract_err}")
+                
+                # 2. 使用 docx2pdf 转换（需要 Microsoft Word）
+                try:
+                    docx2pdf_convert(str(docx_path), str(pdf_path))
+                except Exception as convert_err:
+                    print(f"ERROR: docx2pdf conversion failed: {convert_err}")
+                    raise HTTPException(
+                        status_code=500, 
+                        detail=f"Word 转 PDF 失败，请确保已安装 Microsoft Word: {str(convert_err)}"
+                    )
+                
+                # 3. 读取生成的 PDF
+                with open(pdf_path, "rb") as f:
+                    pdf_bytes = f.read()
+                
+                # 4. 保存 PDF 到 static 目录供前端访问
+                safe_name = f"{hashlib.md5(content).hexdigest()[:10]}.pdf"
+                save_path = STATIC_DIR / "uploads" / safe_name
+                with open(save_path, "wb") as f:
+                    f.write(pdf_bytes)
+                file_url = f"http://127.0.0.1:8000/static/uploads/{safe_name}"
+                
+                # 5. 使用 PDF 解析逻辑提取文本和坐标
+                text, word_map, pages_meta = parse_pdf(pdf_bytes)
+                source_type = "docx"  # 👈 标记为 docx，前端可区分处理
+                
+            print(f"DEBUG: Word->PDF conversion successful, pages: {len(pages_meta)}, OCR images: {len(docx_image_ocr_texts)}")
         elif filename.endswith((".jpg", ".jpeg", ".png", ".webp")):
             # Use local OCR Service (PaddleOCR)
             text = ocr_service.parse_image(content)
@@ -368,7 +445,7 @@ async def upload_file(file: UploadFile = File(...)):
                 print(f"DEBUG: Image OCR text - {para_count} paragraphs, {line_count} line breaks")
                 print(f"DEBUG: Text preview: {final_text[:300]}...")
             elif filename.endswith(".docx"):
-                # Word 文本已经在 parse_docx 中组织好段落与换行，这里直接使用
+                # Word 现在已经转换为 PDF，会走 word_map 分支，这里是兜底逻辑
                 final_text = text
             else:
                 # 其它纯文本类（txt 等），做一次基础清理
@@ -381,6 +458,15 @@ async def upload_file(file: UploadFile = File(...)):
         result["file_url"] = file_url
         result["pages"] = pages_meta
         result["source_type"] = source_type
+        
+        # 如果有 Word 文档中图片的 OCR 结果，也一并返回
+        if docx_image_ocr_texts:
+            result["docx_image_ocr"] = docx_image_ocr_texts
+            # 合并所有图片 OCR 文本，方便前端渲染
+            combined_ocr = "\n\n".join([item["ocr_text"] for item in docx_image_ocr_texts])
+            result["docx_image_ocr_combined"] = combined_ocr
+            print(f"DEBUG: Returning {len(docx_image_ocr_texts)} image OCR results")
+        
         return result
 
     except Exception as e:

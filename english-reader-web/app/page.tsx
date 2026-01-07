@@ -78,6 +78,7 @@ export default function HomePage() {
   const [pdfPages, setPdfPages] = useState<{page_idx: number, width: number, height: number}[]>([]);
   const [rawText, setRawText] = useState<string | null>(null);
   const [sourceType, setSourceType] = useState<string | null>(null);
+  const [docxImageOcrText, setDocxImageOcrText] = useState<string | null>(null);  // Word 文档中图片的 OCR 文本
   // 归一化空行：
   // - 段内：把任意连续空行压缩为 1 个换行（不留空白行）
   // - 不同图片之间：通过特殊标记 IMAGE_SPLIT_MARK 保留 1 个空白行
@@ -136,8 +137,16 @@ export default function HomePage() {
           } else {
             setRawText(null);
           }
+          
+          // 如果是 Word 文档且包含图片 OCR 结果，保存起来
+          if (data.source_type === 'docx' && data.docx_image_ocr_combined) {
+            setDocxImageOcrText(data.docx_image_ocr_combined);
+            console.log('Word document contains image OCR text:', data.docx_image_ocr_combined.substring(0, 100));
+          } else {
+            setDocxImageOcrText(null);
+          }
       } else {
-           // append logic (简单处理，暂不支持 PDF append)
+           // append logic: 在已有内容后追加新内容
            if (newSentences.length > 0) {
                if (!newSentences[0].layout) {
                    newSentences[0].layout = { is_new_paragraph: true, indent_level: 0 };
@@ -147,17 +156,40 @@ export default function HomePage() {
                setSentences(prev => [...prev, ...newSentences]);
            }
 
-           // 对于带有 raw_text 的文件（图片、txt、docx 等）：
-           // 将新内容追加到已有 rawText 后面，用于在 PDF/首个文档之后的新“页面”展示
-          if (data.raw_text) {
-            // 追加文件时：如果已经有 sourceType（例如首个是 image），就保持原类型，
-            // 避免因为后续追加 Word 而切换渲染模式导致图片间的分隔行消失
-            setSourceType(prev => prev || data.source_type || sourceType);
+           // 处理追加的内容
+           // 1. 如果追加的是图片或txt，将其 raw_text 追加到 rawText
+           if (data.raw_text && (data.source_type === 'image' || data.source_type === 'txt')) {
              setRawText(prev => {
                if (!prev) return data.raw_text;
                const trimmedPrev = prev.replace(/\s+$/, '');
                const trimmedNew = (data.raw_text as string).replace(/^\s+/, '');
-               // 使用专用分隔标记，之后在 normalizedRawText 中把它渲染为“空一行”
+               return `${trimmedPrev}\n${IMAGE_SPLIT_MARK}\n${trimmedNew}`;
+             });
+           }
+           
+           // 2. 如果追加的是 Word 文档且包含图片 OCR，追加到 docxImageOcrText
+           if (data.source_type === 'docx' && data.docx_image_ocr_combined) {
+             setDocxImageOcrText(prev => {
+               if (!prev) return data.docx_image_ocr_combined;
+               return `${prev}\n\n${data.docx_image_ocr_combined}`;
+             });
+             // 同时也把 raw_text 追加用于渲染
+             if (data.raw_text) {
+               setRawText(prev => {
+                 if (!prev) return data.raw_text;
+                 const trimmedPrev = prev.replace(/\s+$/, '');
+                 const trimmedNew = (data.raw_text as string).replace(/^\s+/, '');
+                 return `${trimmedPrev}\n${IMAGE_SPLIT_MARK}\n${trimmedNew}`;
+               });
+             }
+           }
+           
+           // 3. 如果追加的是普通 Word 文档（无图片 OCR），也追加其 raw_text
+           if (data.source_type === 'docx' && !data.docx_image_ocr_combined && data.raw_text) {
+             setRawText(prev => {
+               if (!prev) return data.raw_text;
+               const trimmedPrev = prev.replace(/\s+$/, '');
+               const trimmedNew = (data.raw_text as string).replace(/^\s+/, '');
                return `${trimmedPrev}\n${IMAGE_SPLIT_MARK}\n${trimmedNew}`;
              });
            }
@@ -530,7 +562,60 @@ export default function HomePage() {
 
            {/* 文章内容 */}
            {sentences.length > 0 && (
-               fileUrl && fileUrl.endsWith('.pdf') ? (
+               fileUrl && fileUrl.endsWith('.pdf') && sourceType === 'docx' ? (
+                 // Word 文档：PDF 渲染 + 图片 OCR 文本
+                 <>
+                    <PDFViewer 
+                        fileUrl={fileUrl}
+                        pdfPages={pdfPages}
+                        sentences={sentences}
+                        onTokenClick={(token, sentText, e) => handleTokenClick(token, sentText, e)}
+                    />
+                    {/* Word 文档中图片的 OCR 文本（可点击查词）- 与直接上传图片效果完全一致 */}
+                    {docxImageOcrText && (
+                      <div className="border-t border-gray-200 mt-4">
+                        <div className="px-8 sm:px-12 py-4 bg-gray-50/80">
+                          <h3 className="text-sm font-medium text-gray-500 flex items-center gap-2">
+                            <span className="text-lg">🖼️</span>
+                            文档中图片的文字内容（OCR 识别）
+                          </h3>
+                        </div>
+                        <pre
+                          className="px-8 py-10 sm:px-12 sm:py-16 selection:bg-blue-100 selection:text-blue-900 ocr-text"
+                          style={{
+                            fontFamily: '"Times New Roman", "Georgia", "SimSun", serif',
+                            fontSize: fontSize,
+                            lineHeight: 1.9,
+                            whiteSpace: 'pre-wrap',
+                            overflowWrap: 'normal',
+                            wordBreak: 'normal',
+                          }}
+                          onClick={handleRawTextClick}
+                        >
+                          {docxImageOcrText}
+                        </pre>
+                      </div>
+                    )}
+                    {/* 通过 Open Next 追加的内容（图片、txt 等） */}
+                    {normalizedRawText && (
+                      <pre
+                        className="px-8 py-10 sm:px-12 sm:py-16 selection:bg-blue-100 selection:text-blue-900 ocr-text border-t border-gray-100 mt-4"
+                        style={{
+                          fontFamily: '"Times New Roman", "Georgia", "SimSun", serif',
+                          fontSize: fontSize,
+                          lineHeight: 1.9,
+                          whiteSpace: 'pre-wrap',
+                          overflowWrap: 'normal',
+                          wordBreak: 'normal',
+                        }}
+                        onClick={handleRawTextClick}
+                      >
+                        {normalizedRawText}
+                      </pre>
+                    )}
+                 </>
+               ) : fileUrl && fileUrl.endsWith('.pdf') ? (
+                 // 纯 PDF 文件
                  <>
                     <PDFViewer 
                         fileUrl={fileUrl}
