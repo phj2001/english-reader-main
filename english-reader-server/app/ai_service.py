@@ -14,47 +14,56 @@ AI Service - 支持多种大模型 API
 """
 
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
+import httpx
 
 class AIService:
     """
     通用 AI 服务类，支持 OpenAI 兼容的 API
     包括：豆包、通义、DeepSeek、OpenAI 等
     """
-    
+
     def __init__(self, api_key: str, base_url: str, model_name: str):
         if not api_key:
             raise RuntimeError("❌ AI_API_KEY is missing")
         if not model_name:
             raise RuntimeError("❌ AI_MODEL_NAME is missing")
-            
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+
+        # 创建 HTTP 客户端，设置超时
+        timeout = httpx.Timeout(
+            connect=5.0,  # 连接超时 5 秒
+            read=15.0,    # 读取超时 15 秒
+            write=10.0,   # 写入超时 10 秒
+            pool=30.0     # 连接池超时 30 秒
+        )
+
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            http_client=httpx.Client(timeout=timeout, limits=httpx.Limits(max_keepalive_connections=5, max_connections=10))
+        )
         self.model_name = model_name
         print(f"✅ AI Service initialized")
         print(f"   Model: {self.model_name}")
         print(f"   API Base: {base_url}")
 
     def explain_word(self, word: str, sentence: str) -> tuple[str, str]:
-        prompt = f"""你是一个专业的英语语义分析助手。
-
-请仅根据给定句子中的上下文，
-解释单词 "{word}" 在该句中的具体含义。
-
-句子：
-"{sentence}"
+        # 优化后的更简洁的 prompt
+        prompt = f"""单词"{word}"在句子"{sentence}"中的含义是什么？
 
 要求：
-1. 第一行：仅输出中文含义（如：可持续的），不要包含"中文释义"等前缀。
-2. 第二行：仅输出一句话的语境解释（如：描述的是发展和环境保护能够长期维持的状态。），不要包含"语义功能"等前缀。
-3. 不要列出其他词义
-4. 不要翻译整个句子
-5. 严格只输出这两行内容
-"""
+1. 第一行输出中文释义
+2. 第二行输出语境解释"""
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+                temperature=0.3,
+                max_tokens=100  # 限制输出长度，加快响应
             )
             content = response.choices[0].message.content.strip()
             lines = [l for l in content.splitlines() if l.strip()]
@@ -65,24 +74,15 @@ class AIService:
             return "服务错误", f"模型调用失败：{e}"
 
     def translate_text(self, text: str) -> str:
-        prompt = f"""你是一个专业的学术英语翻译助手。
+        # 优化后的更简洁的 prompt
+        prompt = f"""翻译成中文：\n{text}"""
 
-请将以下英文内容准确翻译为中文。
-
-要求：
-1. 忠实原意，不要随意扩展
-2. 使用学术/正式中文表达
-3. 不要添加解释或注释
-4. 只输出翻译结果
-
-英文原文：
-{text}
-"""
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
+                temperature=0.3,
+                max_tokens=500  # 限制输出长度
             )
             return response.choices[0].message.content.strip()
         except Exception as e:

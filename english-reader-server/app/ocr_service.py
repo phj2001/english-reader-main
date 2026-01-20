@@ -5,6 +5,12 @@ from PIL import Image
 import pytesseract
 import io
 
+# Configure Tesseract path from environment variable
+TESSERACT_CMD = os.getenv('TESSERACT_CMD', r'C:\Program Files\Tesseract-OCR\tesseract.exe')
+if os.path.exists(TESSERACT_CMD):
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
+    print(f"Configured Tesseract path: {TESSERACT_CMD}")
+
 
 class OCRService:
     def __init__(self, lang: str = "eng"):

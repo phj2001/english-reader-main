@@ -26,9 +26,17 @@ export const WordPopup: React.FC<WordPopupProps> = ({ x, y, data }) => {
       onDoubleClick={(e) => e.stopPropagation()} // 防止双击卡片关闭自己
     >
       {!data ? (
-         <div className="flex items-center gap-3 text-gray-400">
-           <div className="animate-spin h-4 w-4 border-2 border-blue-600 border-t-transparent rounded-full"></div>
-           <span className="text-sm">Thinking...</span>
+         <div className="flex flex-col items-center gap-4 py-4">
+           {/* 科技感加载动画 */}
+           <div className="flex gap-1">
+             <div className="w-1 h-6 bg-blue-600 rounded-full animate-[bounce_1s_ease-in-out_infinite]"></div>
+             <div className="w-1 h-6 bg-blue-600 rounded-full animate-[bounce_1s_ease-in-out_0.2s_infinite]"></div>
+             <div className="w-1 h-6 bg-blue-600 rounded-full animate-[bounce_1s_ease-in-out_0.4s_infinite]"></div>
+           </div>
+           <div className="text-center">
+             <p className="text-sm font-medium text-gray-600">AI 正在分析</p>
+             <p className="text-xs text-gray-400 mt-1">首次查询需要 1-2 秒</p>
+           </div>
          </div>
       ) : (
         <div className="select-text"> {/* 允许复制 */}

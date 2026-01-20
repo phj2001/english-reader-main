@@ -2,8 +2,10 @@
 
 import { useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
+import { useRouter } from 'next/navigation';
 import { WordPopup } from '../components/WordPopup';
 import { TranslationPopup } from '../components/TranslationPopup';
+import { getAIConfigForAPI } from '../lib/aiConfig';
 
 const PDFViewer = dynamic(() => import('../components/PDFViewer'), {
   ssr: false,
@@ -48,6 +50,8 @@ type ExplainResult = {
 const IMAGE_SPLIT_MARK = '<<__IMG_SPLIT__>>';
 
 export default function HomePage() {
+  const router = useRouter();
+
   /** =======================
    * State 定义
    * ======================= */
@@ -71,7 +75,12 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [fontSize, setFontSize] = useState(20);
   const [isDragging, setIsDragging] = useState(false);
-  const [uploadingFileName, setUploadingFileName] = useState<string>(''); 
+  const [uploadingFileName, setUploadingFileName] = useState<string>('');
+
+  // 性能优化：前端缓存和防抖
+  const [explainCache] = useState<Map<string, ExplainResult>>(new Map());
+  const [translateCache] = useState<Map<string, string>>(new Map());
+  const [pendingRequests] = useState<Set<string>>(new Set());
 
   // PDF 相关状态
   const [fileUrl, setFileUrl] = useState<string | null>(null);
@@ -271,27 +280,51 @@ export default function HomePage() {
    * ======================= */
   const handleTokenClick = async (token: Token, sentenceText: string, event: React.MouseEvent) => {
     // ⭐ 关键：阻止冒泡
-    event.stopPropagation(); 
-    
+    event.stopPropagation();
+
     // 互斥逻辑
     setSelectionPopup(null);
-    
+
+    // 获取前端配置的 AI 参数
+    const aiConfig = getAIConfigForAPI();
+    const cacheKey = `${token.text}:${sentenceText}:${JSON.stringify(aiConfig)}`;
+
+    // 🚀 性能优化1：检查缓存
+    if (explainCache.has(cacheKey)) {
+      console.log('✅ Cache hit for:', token.text);
+      setWordPopup({ x: event.clientX, y: event.clientY, data: explainCache.get(cacheKey)! });
+      return;
+    }
+
+    // 🚀 性能优化2：防抖 - 防止重复请求
+    if (pendingRequests.has(cacheKey)) {
+      console.log('⏳ Request already in progress, skipping...');
+      return;
+    }
+
+    pendingRequests.add(cacheKey);
     setWordPopup({ x: event.clientX, y: event.clientY, data: null });
 
     try {
       const res = await fetch('http://127.0.0.1:8000/explain-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          token_id: token.token_id, 
-          word: token.text, 
-          sentence: sentenceText 
+        body: JSON.stringify({
+          token_id: token.token_id,
+          word: token.text,
+          sentence: sentenceText,
+          ...aiConfig  // 动态配置参数
         })
       });
       const data = await res.json();
+
+      // 🚀 性能优化3：存入缓存
+      explainCache.set(cacheKey, data);
       setWordPopup({ x: event.clientX, y: event.clientY, data });
     } catch (err) {
       setWordPopup(null);
+    } finally {
+      pendingRequests.delete(cacheKey);
     }
   };
 
@@ -387,22 +420,49 @@ export default function HomePage() {
     const x = rect.left + rect.width / 2;
     const y = rect.top + window.scrollY;
 
+    // 获取前端配置的 AI 参数
+    const aiConfig = getAIConfigForAPI();
+    const cacheKey = `translate:${text}:${JSON.stringify(aiConfig)}`;
+
+    // 🚀 性能优化：检查翻译缓存
+    if (translateCache.has(cacheKey)) {
+      console.log('✅ Translation cache hit');
+      setSelectionPopup({ x, y, text, translation: translateCache.get(cacheKey)! });
+      return;
+    }
+
+    // 🚀 性能优化：防抖
+    if (pendingRequests.has(cacheKey)) {
+      console.log('⏳ Translation request already in progress');
+      return;
+    }
+
+    pendingRequests.add(cacheKey);
     setSelectionPopup({ x, y, text, translation: "翻译中..." });
 
     try {
       const res = await fetch('http://127.0.0.1:8000/translate-text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({
+          text,
+          ...aiConfig  // 动态配置参数
+        })
       });
       const data = await res.json();
+
+      // 🚀 性能优化：存入翻译缓存
+      translateCache.set(cacheKey, data.translation_zh);
       
       setSelectionPopup(prev => prev ? { ...prev, translation: data.translation_zh } : null);
     } catch (err: any) {
-      setSelectionPopup(prev => prev ? { 
-        ...prev, 
-        translation: `翻译失败: ${err.message || '未知错误'}` 
-      } : null);
+      setSelectionPopup(prev => prev ?
+        {
+          ...prev,
+          translation: `翻译失败: ${err.message || '未知错误'}`
+        } : null);
+    } finally {
+      pendingRequests.delete(cacheKey);
     }
   };
 
@@ -445,7 +505,20 @@ export default function HomePage() {
                  A+
                </button>
              </div>
-             
+
+             {/* 设置按钮 */}
+             <button
+                onClick={() => router.push('/settings')}
+                className="flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-colors bg-gray-100 hover:bg-gray-200 text-gray-700"
+                title="设置"
+             >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                <span className="hidden sm:inline">设置</span>
+             </button>
+
              {/* 动态上传按钮组 */}
              {sentences.length === 0 ? (
                  <label className="cursor-pointer bg-black hover:bg-gray-800 text-white px-4 py-2 rounded-full text-sm font-medium transition-colors shadow-lg shadow-gray-200 flex items-center gap-2">
@@ -725,7 +798,7 @@ export default function HomePage() {
 
       {/* --- 句子翻译 Popup --- */}
       {selectionPopup && (
-         <TranslationPopup 
+         <TranslationPopup
             initialX={Math.min(selectionPopup.x - 192, window.innerWidth - 400)}
             initialY={selectionPopup.y + 10}
             text={selectionPopup.text}
@@ -733,6 +806,11 @@ export default function HomePage() {
             onClose={() => setSelectionPopup(null)}
          />
       )}
+
+      {/* 版权信息 */}
+      <footer className="fixed bottom-0 left-0 right-0 py-2 text-center text-xs text-gray-400 bg-white/80 backdrop-blur-sm border-t border-gray-100">
+        © 2025 English Reader · Created by 清忧@凡辰
+      </footer>
     </div>
   );
 }

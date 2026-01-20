@@ -17,6 +17,7 @@ from .db import get_conn, init_cache, DB_PATH
 from .text_utils import clean_text, decode_escaped_newlines, normalize_exam_like_image
 from .ai_service import AIService, GeminiService
 from .ocr_service import OCRService
+from .config_manager import config_manager
 
 # =========================
 # 1️⃣ 环境变量 & 基础配置
@@ -94,9 +95,66 @@ nlp = spacy.load("en_core_web_sm")
 # Initialize Cache
 init_cache()
 
-def make_cache_key(sentence: str, word: str) -> str:
-    h = hashlib.md5(sentence.strip().lower().encode()).hexdigest()[:8]
-    return f"explain:{h}:{word.lower()}"
+def make_cache_key(sentence: str, word: str, ai_config: str = "") -> str:
+    """
+    生成缓存 key
+
+    Args:
+        sentence: 句子文本
+        word: 单词
+        ai_config: AI 配置标识（provider + model）
+    """
+    sentence_hash = hashlib.md5(sentence.strip().lower().encode()).hexdigest()[:8]
+    word_lower = word.lower()
+
+    # 如果提供了 AI 配置，加入缓存 key
+    if ai_config:
+        return f"explain:{sentence_hash}:{word_lower}:{ai_config}"
+    else:
+        # 兼容旧的缓存 key（默认配置）
+        return f"explain:{sentence_hash}:{word_lower}"
+
+
+def make_ai_config_key(provider: str = None, model: str = None) -> str:
+    """生成 AI 配置标识符"""
+    if not provider:
+        return "default"
+    return f"{provider}:{model or 'default'}"
+
+
+def create_ai_service(ai_provider: str = None, ai_api_key: str = None,
+                      ai_base_url: str = None, ai_model_name: str = None,
+                      gemini_api_key: str = None, gemini_model_name: str = None):
+    """
+    创建 AI 服务实例（支持动态配置）
+
+    如果提供了动态配置参数，使用动态配置创建临时实例
+    否则使用全局的 ai_service（从 .env 加载的默认配置）
+    """
+    # 如果没有提供动态配置，使用全局默认服务
+    if not ai_provider:
+        return ai_service
+
+    # 如果提供了动态配置，创建临时服务实例
+    try:
+        if ai_provider == "gemini":
+            if not gemini_api_key:
+                raise ValueError("Missing Gemini API Key")
+            if not gemini_model_name:
+                gemini_model_name = "gemini-1.5-flash"
+            return GeminiService(api_key=gemini_api_key, model_name=gemini_model_name)
+        else:
+            if not ai_api_key:
+                raise ValueError("Missing API Key")
+            if not ai_base_url:
+                ai_base_url = "https://api.openai.com/v1"
+            if not ai_model_name:
+                raise ValueError("Missing model name")
+            return AIService(api_key=ai_api_key, base_url=ai_base_url, model_name=ai_model_name)
+    except Exception as e:
+        print(f"Error creating AI service: {e}")
+        # 如果动态配置失败，回退到默认服务
+        return ai_service
 
 # =========================
 # 5️⃣ 数据模型
@@ -109,9 +167,23 @@ class ExplainRequest(BaseModel):
     token_id: str
     word: str
     sentence: str
+    # 可选的动态 AI 配置
+    ai_provider: str = None
+    ai_api_key: str = None
+    ai_base_url: str = None
+    ai_model_name: str = None
+    gemini_api_key: str = None
+    gemini_model_name: str = None
 
 class TranslateRequest(BaseModel):
     text: str
+    # 可选的动态 AI 配置
+    ai_provider: str = None
+    ai_api_key: str = None
+    ai_base_url: str = None
+    ai_model_name: str = None
+    gemini_api_key: str = None
+    gemini_model_name: str = None
 
 # =========================
 # 6️⃣ Core Logic: PDF Extraction
@@ -489,12 +561,21 @@ def parse_text(req: ParseRequest):
 
 @app.post("/explain-token")
 def explain_token(req: ExplainRequest):
-    cache_key = make_cache_key(req.sentence, req.word)
+    # 1. 生成 AI 配置标识（用于缓存 key）
+    if req.ai_provider == "gemini":
+        ai_config_key = make_ai_config_key("gemini", req.gemini_model_name)
+    elif req.ai_provider:
+        ai_config_key = make_ai_config_key(req.ai_provider, req.ai_model_name)
+    else:
+        ai_config_key = ""
+
+    # 2. 生成缓存 key（包含 AI 配置）
+    cache_key = make_cache_key(req.sentence, req.word, ai_config_key)
 
     conn = get_conn()
     cur = conn.cursor()
 
-    # 1. Check Cache
+    # 3. Check Cache（先查缓存，命中则直接返回）
     cur.execute(
         "SELECT meaning_zh, explanation_zh FROM explain_cache WHERE cache_key = ?",
         (cache_key,)
@@ -503,6 +584,7 @@ def explain_token(req: ExplainRequest):
 
     if row:
         conn.close()
+        print(f"[CACHE HIT] {req.word} - {ai_config_key}")  # 调试日志
         return {
             "word": req.word,
             "meaning_zh": row[0],
@@ -510,10 +592,21 @@ def explain_token(req: ExplainRequest):
             "confidence": 0.95
         }
 
-    # 2. Call AI
-    meaning, explanation = ai_service.explain_word(req.word, req.sentence)
+    print(f"[CACHE MISS] {req.word} - {ai_config_key}")  # 调试日志
 
-    # 3. Write Cache
+    # 4. 缓存未命中，创建 AI 服务并调用
+    service = create_ai_service(
+        ai_provider=req.ai_provider,
+        ai_api_key=req.ai_api_key,
+        ai_base_url=req.ai_base_url,
+        ai_model_name=req.ai_model_name,
+        gemini_api_key=req.gemini_api_key,
+        gemini_model_name=req.gemini_model_name
+    )
+
+    meaning, explanation = service.explain_word(req.word, req.sentence)
+
+    # 5. Write Cache
     cur.execute(
         """
         INSERT INTO explain_cache
@@ -534,7 +627,119 @@ def explain_token(req: ExplainRequest):
 
 @app.post("/translate-text")
 def translate_text(req: TranslateRequest):
-    translation = ai_service.translate_text(req.text)
+    # 使用动态配置或默认配置创建 AI 服务
+    service = create_ai_service(
+        ai_provider=req.ai_provider,
+        ai_api_key=req.ai_api_key,
+        ai_base_url=req.ai_base_url,
+        ai_model_name=req.ai_model_name,
+        gemini_api_key=req.gemini_api_key,
+        gemini_model_name=req.gemini_model_name
+    )
+
+    translation = service.translate_text(req.text)
     return {
         "translation_zh": translation
     }
+
+
+# =========================
+# AI 配置管理 API
+# =========================
+
+class AIConfigRequest(BaseModel):
+    provider: str
+    api_key: str = ""
+    base_url: str = ""
+    model_name: str = ""
+    gemini_api_key: str = ""
+    gemini_model_name: str = "gemini-1.5-flash"
+    use_proxy: bool = False
+    http_proxy: str = ""
+    https_proxy: str = ""
+
+
+@app.get("/api/config/providers")
+def get_providers():
+    """获取所有可用的 AI 提供商"""
+    return {
+        "providers": config_manager.get_all_providers()
+    }
+
+
+@app.get("/api/config/current")
+def get_current_config():
+    """获取当前配置"""
+    return config_manager.get_current_config()
+
+
+@app.post("/api/config/update")
+def update_config(req: AIConfigRequest):
+    """更新 AI 配置"""
+    success = config_manager.update_config({
+        "provider": req.provider,
+        "api_key": req.api_key,
+        "base_url": req.base_url,
+        "model_name": req.model_name,
+        "gemini_api_key": req.gemini_api_key,
+        "gemini_model_name": req.gemini_model_name,
+        "use_proxy": req.use_proxy,
+        "http_proxy": req.http_proxy,
+        "https_proxy": req.https_proxy
+    })
+
+    if success:
+        return {
+            "success": True,
+            "message": "配置已更新，请重启后端服务以应用新配置"
+        }
+    else:
+        raise HTTPException(status_code=500, detail="配置更新失败")
+
+
+@app.post("/api/config/test")
+def test_config(req: AIConfigRequest):
+    """测试 AI 配置是否有效"""
+    try:
+        provider = req.provider
+
+        if provider == "gemini":
+            if not req.gemini_api_key:
+                raise HTTPException(status_code=400, detail="缺少 Gemini API Key")
+
+            from .ai_service import GeminiService
+            test_service = GeminiService(
+                api_key=req.gemini_api_key,
+                model_name=req.gemini_model_name
+            )
+        else:
+            if not req.api_key:
+                raise HTTPException(status_code=400, detail="缺少 API Key")
+            if not req.base_url:
+                raise HTTPException(status_code=400, detail="缺少 Base URL")
+            if not req.model_name:
+                raise HTTPException(status_code=400, detail="缺少模型名称")
+
+            from .ai_service import AIService
+            test_service = AIService(
+                api_key=req.api_key,
+                base_url=req.base_url,
+                model_name=req.model_name
+            )
+
+        # 测试翻译功能
+        test_result = test_service.translate_text("Hello")
+
+        return {
+            "success": True,
+            "message": "连接测试成功",
+            "test_result": test_result
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"连接测试失败: {str(e)}"
+        )
